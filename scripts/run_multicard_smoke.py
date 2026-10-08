@@ -140,6 +140,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Read prompt from the file (default: {DEFAULT_PROMPT})",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Capture a torch.profiler Chrome trace during the run phase (after warmup).",
+    )
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="Chrome-trace output path when --profile is set (default: <model>_tp<world_size>_trace.json).",
+    )
+    parser.add_argument(
+        "--with-stack",
+        action="store_true",
+        help=(
+            "Record Python source stack and module hierarchy in trace. "
+            "Only used when --profile is set."
+        ),
+    )
     return parser
 
 
@@ -204,6 +222,11 @@ def main(argv: list[str] | None = None) -> None:
     else:
         prompt = DEFAULT_PROMPT
 
+    profile_trace_path = None
+    if args.profile or args.out is not None:
+        model_name = os.path.basename(args.model.rstrip("/")) or "model"
+        profile_trace_path = args.out or f"{model_name}_tp{world_size}_trace.json"
+
     result = run_multicard_smoke_test(
         args.model,
         max_new_tokens=args.max_new_tokens,
@@ -211,6 +234,8 @@ def main(argv: list[str] | None = None) -> None:
         dtype=dtype,
         batch_size=args.batch,
         prompt=prompt,
+        profile_trace_path=profile_trace_path,
+        with_stack=args.with_stack,
     )
 
     # ── Summary table ──────────────────────────────────────────────────────

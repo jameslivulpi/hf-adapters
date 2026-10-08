@@ -149,6 +149,8 @@ def run_multicard_smoke_test(
     batch_size: int = _DEFAULT_BATCH_SIZE,
     trust_remote_code: bool | None = None,
     prompt: str = _DEFAULT_PROMPT,
+    profile_trace_path: str | None = None,
+    with_stack: bool = False,
 ) -> dict[str, Any]:
     """Load model and generate tokens; return a diagnostics dict.
 
@@ -294,7 +296,7 @@ def run_multicard_smoke_test(
         f"(batch={batch_size}, tokens={actual_prompt_len})"
     )
 
-    def _run_generate() -> tuple[list[str], str]:
+    def _run_generate(do_profile: bool = False) -> tuple[list[str], str]:
         """Run one generate call; return (output_texts_per_seq, captured_stdout)."""
         buf = io.StringIO()
         gen_kwargs: dict[str, Any] = {
@@ -304,11 +306,37 @@ def run_multicard_smoke_test(
         }
         if min_new_tokens is not None:
             gen_kwargs["min_new_tokens"] = min_new_tokens
-        with contextlib.redirect_stdout(buf):
-            sequences = model.generate(
-                **encoded,
-                **gen_kwargs,
-            )
+
+        if do_profile:
+            from torch.profiler import ProfilerActivity, profile
+
+            out_trace = profile_trace_path
+            if out_trace is not None and world_size > 1:
+                stem, suffix = os.path.splitext(out_trace)
+                out_trace = f"{stem}.rank{local_rank}{suffix or '.json'}"
+
+            print(f"[profile] capturing trace... (with_stack={with_stack})")
+            with contextlib.redirect_stdout(buf):
+                with profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.PrivateUse1],
+                    record_shapes=True,
+                    with_stack=with_stack,
+                    with_modules=with_stack,
+                ) as prof:
+                    sequences = model.generate(
+                        **encoded,
+                        **gen_kwargs,
+                    )
+            if out_trace is not None:
+                prof.export_chrome_trace(out_trace)
+                print(f"  trace → {out_trace}")
+        else:
+            with contextlib.redirect_stdout(buf):
+                sequences = model.generate(
+                    **encoded,
+                    **gen_kwargs,
+                )
+
         captured = buf.getvalue()
         print(captured, end="")
         output_texts = [
@@ -320,7 +348,7 @@ def run_multicard_smoke_test(
     # ── Phase 2: generation (warm up) ────────────────────────────────────────────────
     print(f"\n{'=' * 20} Warmup Model...")
     try:
-        _run_generate()
+        _run_generate(do_profile=False)
     except Exception:
         result["error"] = "GENERATE FAILED\n" + traceback.format_exc()
         print(f"  [rank {local_rank}] Warmup FAILED:\n{result['error']}")
@@ -330,7 +358,7 @@ def run_multicard_smoke_test(
     print(f"\n{'=' * 20} Run Model...")
     gen_t0 = time.time()
     try:
-        output_texts, captured = _run_generate()
+        output_texts, captured = _run_generate(do_profile=profile_trace_path is not None)
         result["gen_s"] = time.time() - gen_t0
 
         ttft, decode, per_token = _parse_timing(captured)
